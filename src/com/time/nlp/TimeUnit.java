@@ -31,6 +31,7 @@ public class TimeUnit {
     private Date time;
     private Boolean isAllDayTime = true;
     private boolean isFirstTimeSolveContext = true;
+    private boolean isMorning = false;
 
     TimeNormalizer normalizer = null;
     public TimePoint _tp = new TimePoint();
@@ -165,37 +166,25 @@ public class TimeUnit {
             preferFuture(2);
         }
     }
-
+    
     /**
-     * 时-规范化方法
+     * 时-关键词检查方法
      * <p>
-     * 该方法识别时间表达式单元的时字段
-     */
-    public void norm_sethour() {
-        String rule = "(?<!(周|星期))([0-2]?[0-9])(?=(点|时))";
-
+     * 对关键字：早（包含早上/早晨/早间），上午，中午,午间,下午,午后,晚上,傍晚,晚间,晚,pm,PM的正确时间计算
+     * 规约：
+	 * 1.中午/午间0-10点视为12-22点
+	 * 2.下午/午后0-11点视为12-23点
+	 * 3.晚上/傍晚/晚间/晚1-11点视为13-23点，12点视为0点
+	 * 4.0-11点pm/PM视为12-23点
+	 * 
+	 * add by kexm
+	 */
+    public void norm_checkkeyword_hour() {
+    	String rule = "凌晨";
         Pattern pattern = Pattern.compile(rule);
         Matcher match = pattern.matcher(Time_Expression);
         if (match.find()) {
-            _tp.tunit[3] = Integer.parseInt(match.group());
-            /**处理倾向于未来时间的情况  @author kexm*/
-            preferFuture(3);
-            isAllDayTime = false;
-        }
-        /*
-         * 对关键字：早（包含早上/早晨/早间），上午，中午,午间,下午,午后,晚上,傍晚,晚间,晚,pm,PM的正确时间计算
-		 * 规约：
-		 * 1.中午/午间0-10点视为12-22点
-		 * 2.下午/午后0-11点视为12-23点
-		 * 3.晚上/傍晚/晚间/晚1-11点视为13-23点，12点视为0点
-		 * 4.0-11点pm/PM视为12-23点
-		 * 
-		 * add by kexm
-		 */
-        rule = "凌晨";
-        pattern = Pattern.compile(rule);
-        match = pattern.matcher(Time_Expression);
-        if (match.find()) {
+        	this.isMorning = true;
             if (_tp.tunit[3] == -1) /**增加对没有明确时间点，只写了“凌晨”这种情况的处理 @author kexm*/
                 _tp.tunit[3] = RangeTimeEnum.day_break.getHourTime();
             /**处理倾向于未来时间的情况  @author kexm*/
@@ -207,6 +196,7 @@ public class TimeUnit {
         pattern = Pattern.compile(rule);
         match = pattern.matcher(Time_Expression);
         if (match.find()) {
+        	this.isMorning = true;
             if (_tp.tunit[3] == -1) /**增加对没有明确时间点，只写了“早上/早晨/早间”这种情况的处理 @author kexm*/
                 _tp.tunit[3] = RangeTimeEnum.early_morning.getHourTime();
             /**处理倾向于未来时间的情况  @author kexm*/
@@ -218,6 +208,7 @@ public class TimeUnit {
         pattern = Pattern.compile(rule);
         match = pattern.matcher(Time_Expression);
         if (match.find()) {
+        	this.isMorning = true;
             if (_tp.tunit[3] == -1) /**增加对没有明确时间点，只写了“上午”这种情况的处理 @author kexm*/
                 _tp.tunit[3] = RangeTimeEnum.morning.getHourTime();
             /**处理倾向于未来时间的情况  @author kexm*/
@@ -229,6 +220,7 @@ public class TimeUnit {
         pattern = Pattern.compile(rule);
         match = pattern.matcher(Time_Expression);
         if (match.find()) {
+        	this.isMorning = true;
             if (_tp.tunit[3] >= 0 && _tp.tunit[3] <= 10)
                 _tp.tunit[3] += 12;
             if (_tp.tunit[3] == -1) /**增加对没有明确时间点，只写了“中午/午间”这种情况的处理 @author kexm*/
@@ -266,7 +258,29 @@ public class TimeUnit {
             preferFuture(3);
             isAllDayTime = false;
         }
+	}
 
+    /**
+     * 时-规范化方法
+     * <p>
+     * 该方法识别时间表达式单元的时字段
+     */
+    public void norm_sethour() {
+        String rule = "(?<!(周|星期))([0-2]?[0-9])(?=(点|时))";
+        Pattern pattern = Pattern.compile(rule);
+        Matcher match = pattern.matcher(Time_Expression);
+        if (match.find()) {
+            _tp.tunit[3] = Integer.parseInt(match.group());
+            /** 先处理时-关键词，再处理未来时间情况 */
+            this.norm_checkkeyword_hour();
+            /**处理倾向于未来时间的情况  @author kexm*/
+            preferFuture(3);
+            isAllDayTime = false;
+        } else {
+        	/** 处理时-关键词 */
+        	this.norm_checkkeyword_hour();
+        }
+        
     }
 
     /**
@@ -925,10 +939,14 @@ public class TimeUnit {
         }
         /**2. 根据上下文补充时间*/
         checkContextTime(checkTimeIndex);
-        /**3. 根据上下文补充时间后再次检查被检查的时间级别之前，是否没有更高级的已经确定的时间，如果有，则不进行倾向处理.*/
-        for (int i = 0; i < checkTimeIndex; i++) {
-            if (_tp.tunit[i] != -1) return;
-        }
+        /**3. 根据上下文补充时间后再次检查被检查的时间级别之前，是否没有更高级的已经确定的时间，如果有，则不进行倾向处理.
+         * 首先，若有上文，上文会被设定为TimeBase。
+         * 其次，下文可能会在上文的基础上需要倾向处理。如：今晚8点到2点。其中2点为明天。
+         * 所以，下面代码不太合理，进行注释。
+         */
+//        for (int i = 0; i < checkTimeIndex; i++) {
+//            if (_tp.tunit[i] != -1) return;
+//        }
         /**4. 确认用户选项*/
         if (!normalizer.isPreferFuture()) {
             return;
@@ -999,13 +1017,19 @@ public class TimeUnit {
      * 根据上下文时间补充时间信息
      */
     private void checkContextTime(int checkTimeIndex) {
+    	/** 若已经补充过上下文时间，则无需再进行补充 */
+    	if (!isFirstTimeSolveContext) {
+    		return;
+    	}
         for (int i = 0; i < checkTimeIndex; i++) {
             if (_tp.tunit[i] == -1 && _tp_origin.tunit[i] != -1) {
                 _tp.tunit[i] = _tp_origin.tunit[i];
             }
         }
-        /**在处理小时这个级别时，如果上文时间是下午的且下文没有主动声明小时级别以上的时间，则也把下文时间设为下午*/
-        if (isFirstTimeSolveContext == true && checkTimeIndex == 3 && _tp_origin.tunit[checkTimeIndex] >= 12 && _tp.tunit[checkTimeIndex] < 12) {
+        /**在处理小时这个级别时，如果上文时间是下午的且下文没有主动声明小时级别以上的时间（包括时-关键词），则也把下文时间设为下午*/
+        int t_o = _tp_origin.tunit[checkTimeIndex];
+        int t = _tp.tunit[checkTimeIndex];
+        if (!isMorning && checkTimeIndex == 3 && t_o >= 12 && (t_o-12) < t && t < 12) {
             _tp.tunit[checkTimeIndex] += 12;
         }
         isFirstTimeSolveContext = false;
